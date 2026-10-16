@@ -277,8 +277,8 @@ export default Plugin.define({
         const t0 = Date.now();
         // event.messages — уже без серверного recent-хвоста: капсулируем ЦЕЛИКОМ
         const msgs = event.messages as TransferMessage[];
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
-          let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
           const built = await Promise.race([
             buildCapsuleSummary(
               msgs,
@@ -297,7 +297,6 @@ export default Plugin.define({
               );
             }),
           ]);
-          if (deadlineTimer) clearTimeout(deadlineTimer);
           event.result = { summary: built.summary };
           log(
             `compaction hook: ${built.capsuleCount} капсул за ${Date.now() - t0}ms`,
@@ -307,6 +306,8 @@ export default Plugin.define({
           log(
             `compaction hook: капсулы упали (${String(e).slice(0, 120)}) — нативный саммари`,
           );
+        } finally {
+          if (deadlineTimer) clearTimeout(deadlineTimer);
         }
       });
       log("compaction hook зарегистрирован");
