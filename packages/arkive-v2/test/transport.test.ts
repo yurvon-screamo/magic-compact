@@ -31,6 +31,10 @@ const mkApi = (
   const store = new Map<string, Transfer>();
   let importCount = 0;
   const api: SessionApi = {
+    async listSessions() {
+      calls.push("list");
+      return opts.children ?? [];
+    },
     async exportTransfer(sid) {
       calls.push(`export:${sid}`);
       const t = store.get(sid);
@@ -73,9 +77,6 @@ const mkApi = (
       rePrompts.push(text);
       return 200;
     },
-    async listSessions() {
-      return opts.children ?? [];
-    },
   };
   return { api, calls, removed, rePrompts, store };
 };
@@ -97,6 +98,7 @@ describe("rewriteSession: happy path", () => {
     );
     // порядок: list → export → import(pf) → remove(pf) → inbox → remove(src) → import(src)
     expect(calls[0]).toBe("list" in api ? calls[0] : calls[0]); // список первый (см. ниже)
+    expect(calls[0]).toBe("list");
     expect(calls.find(c => c.startsWith("export:"))).toContain("ses_SOURCE");
     const pfRemove = calls.find(c => c.startsWith("remove:ses_e"));
     expect(pfRemove).toBeTruthy(); // pre-flight копия удалена (High#1)
@@ -131,16 +133,9 @@ describe("rewriteSession: дрен inbox", () => {
     const { api, rePrompts, removed } = mkApi({
       inbox: [{ id: "in1", text: "не потеряй меня" }],
     });
-    const src = T("ses_SOURCE", msg("m1", "user", "q"));
-    const st = new Map<string, Transfer>();
-    // прокинем стор
-    const store = api as unknown as { store?: Map<string, Transfer> };
-    void store;
-    void st;
-    // mkApi хранит стор внутри; положим исходник через exportTransfer мока — упростим: свой мини-стор
     const api2: SessionApi = {
       ...api,
-      exportTransfer: async () => src,
+      exportTransfer: async () => T("ses_SOURCE", msg("m1", "user", "q")),
     };
     await rewriteSession(api2, "ses_SOURCE", "/loc", t => t.messages);
     expect(rePrompts).toEqual(["не потеряй меня"]);

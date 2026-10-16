@@ -6,6 +6,7 @@
 import { Plugin } from "@opencode/plugin";
 import {
   appendFileSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -48,6 +49,7 @@ const TRIM_KEEP_TURNS = 4; // ходы, не трогаемые тримом (д
 const MAX_CAPSULES = 40; // ревью High#5: ограничить число flash-вызовов за хук
 const HOOK_DEADLINE_MS = 20 * 60_000; // ревью High#5: общий дедлайн хука → fallback натив
 const BACKUP_KEEP = 3; // ревью Common: retention бэкапов = 3 (ротация)
+const MAX_STORED_SESSIONS = 50; // cap omission-store: неактивные сессии вытесняются
 
 // —— omission-стора: per-session (ревью Common#3), persist на диск ———
 type PersistedStore = {
@@ -102,6 +104,15 @@ const persistStore = (sid: string, commit: boolean) => {
       })(),
     };
   }
+  // рост ограничен: неактивные сессии вытесняются сверх MAX_STORED_SESSIONS
+  const keys = Object.keys(persisted.sessions);
+  for (const k of keys.slice(
+    0,
+    Math.max(0, keys.length - MAX_STORED_SESSIONS),
+  )) {
+    delete persisted.sessions[k];
+    stores.delete(k);
+  }
   ensureDir();
   writeFileSync(
     join(BACKUP_DIR, "omission-store.json"),
@@ -113,21 +124,13 @@ const persistBackup = (sessionID: string, transfer: unknown) => {
   // ротация {sid}.1..3 (ревью: retention 3)
   for (let i = BACKUP_KEEP - 1; i >= 1; i--) {
     const from = join(BACKUP_DIR, `${sessionID}.${i}.json`);
-    if (readFileSyncSafe(from))
+    if (existsSync(from))
       renameSync(from, join(BACKUP_DIR, `${sessionID}.${i + 1}.json`));
   }
   writeFileSync(
     join(BACKUP_DIR, `${sessionID}.1.json`),
     JSON.stringify(transfer),
   );
-};
-const readFileSyncSafe = (p: string) => {
-  try {
-    readFileSync(p);
-    return true;
-  } catch {
-    return false;
-  }
 };
 const deadLetter = (texts: string[], error: string) => {
   try {
@@ -275,6 +278,7 @@ export default Plugin.define({
         // event.messages — уже без серверного recent-хвоста: капсулируем ЦЕЛИКОМ
         const msgs = event.messages as TransferMessage[];
         try {
+          let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
           const built = await Promise.race([
             buildCapsuleSummary(
               msgs,
@@ -286,13 +290,14 @@ export default Plugin.define({
               },
               MAX_CAPSULES,
             ),
-            new Promise<never>((_, reject) =>
-              setTimeout(
+            new Promise<never>((_, reject) => {
+              deadlineTimer = setTimeout(
                 () => reject(new Error("hook deadline")),
                 HOOK_DEADLINE_MS,
-              ),
-            ),
+              );
+            }),
           ]);
+          if (deadlineTimer) clearTimeout(deadlineTimer);
           event.result = { summary: built.summary };
           log(
             `compaction hook: ${built.capsuleCount} капсул за ${Date.now() - t0}ms`,
@@ -421,8 +426,14 @@ export default Plugin.define({
           description: "Статистика Arkive: omission-кэш, бэкапы",
           execute: async ({ sessionID }: { sessionID: string }) => {
             const store = stores.get(sessionID);
+            ensureDir();
             const backups = readdirSync(BACKUP_DIR, { withFileTypes: true })
-              .filter(d => d.name.startsWith(sessionID))
+              .filter(
+                d =>
+                  d.name === `${sessionID}.1.json`
+                  || d.name === `${sessionID}.2.json`
+                  || d.name === `${sessionID}.3.json`,
+              )
               .map(d => d.name);
             await ctx.session.synthetic({
               sessionID,

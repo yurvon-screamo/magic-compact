@@ -165,6 +165,16 @@ describe("rules: адаптация V1-правил", () => {
     expect(d.kind).toBe("replace-output");
     if (d.kind === "replace-output") expect(d.cacheContent).toBe(big);
   });
+  test("edit: мелкий old + жирный new (вставка) → replace-input — регрессия объёма", () => {
+    const d = decideToolPart(
+      toolPart("t5ins", "edit", { oldString: "точка", newString: big }, ""),
+      ctx,
+    );
+    expect(d.kind).toBe("replace-input");
+    if (d.kind === "replace-input") {
+      expect(d.cacheContent).toContain(big.slice(0, 10));
+    }
+  });
   test("edit: большое содержание → replace-input + кэш", () => {
     const d = decideToolPart(
       toolPart("t5", "edit", { oldString: big, newString: big }, ""),

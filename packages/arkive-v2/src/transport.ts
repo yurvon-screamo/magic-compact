@@ -85,6 +85,8 @@ export const rewriteSession = async (
       log(
         `pre-flight копия не удалилась (${pfRemoved}) — почисть вручную ${pf.id}`,
       );
+  } else {
+    log(`pre-flight 200 без id — копия не распознана, проверь список сессий`);
   }
 
   // 3. дрен inbox: cancel + тексты для пере-отправки (нетекстовые payload теряем только с логом)
@@ -129,13 +131,22 @@ export const rewriteSession = async (
     }
   }
 
-  // 5. пере-отправка дренированных промптов (тексты жили в памяти через отказные пути — onDeadLetter)
+  // 5. пере-отправка дренированных промптов; неудача — dead-letter (промпт не роняется)
+  const failedDrain: string[] = [];
   for (const text of drainedTexts) {
     const st = await api.prompt(sessionID, text);
-    if (st !== 200)
+    if (st !== 200) {
       log(
         `дренированный промпт не переотправился (${st}): ${text.slice(0, 80)}`,
       );
+      failedDrain.push(text);
+    }
+  }
+  if (failedDrain.length > 0) {
+    hooks.onDeadLetter?.(
+      failedDrain,
+      `re-prompt failed after successful rewrite`,
+    );
   }
   return { backup: transfer };
 };
