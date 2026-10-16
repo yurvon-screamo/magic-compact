@@ -73,7 +73,7 @@ const locks = new Set<string>();
 
 export default Plugin.define({
   id: "arkive-v2",
-  setup(ctx) {
+  async setup(ctx) {
     log(`arkive-v2 loaded (app ${ctx.app.version}, ${ctx.location.directory})`);
     const store = loadStore();
 
@@ -88,185 +88,192 @@ export default Plugin.define({
       messages: TransferMessage[];
     };
     type InboxItem = { id: string; payload?: { text?: string }; text?: string };
-    void ctx.session.hook("compaction", async (event: CompactionEvent) => {
-      const t0 = Date.now();
-      const msgs = event.messages as TransferMessage[];
-      const plan = planCapsules(msgs, KEEP_TURNS);
-      log(
-        `compaction hook: session=${event.sessionID} ходов к капсулированию=${plan.capsule.length}, мелких=${plan.minor.length}`,
-      );
-      try {
-        const { summary, capsuleCount } = await buildCapsuleSummary(
-          msgs,
-          KEEP_TURNS,
-          async prompt => {
-            const out = await ctx.generate.text({ model: FLASH, prompt });
-            const obj = out as unknown as { text?: string };
-            return String(obj?.text ?? out ?? "").trim();
-          },
-        );
-        event.result = { summary };
-        log(`compaction hook: ${capsuleCount} капсул за ${Date.now() - t0}ms`);
-      } catch (e) {
-        // отказ капсул НЕ должен ломать нативный компакшн: отдаём одну строку-заглушку
+    try {
+      await ctx.session.hook("compaction", async (event: CompactionEvent) => {
+        const t0 = Date.now();
+        const msgs = event.messages as TransferMessage[];
+        const plan = planCapsules(msgs, KEEP_TURNS);
         log(
-          `compaction hook: капсулы упали (${String(e).slice(0, 120)}) — нативный саммари`,
+          `compaction hook: session=${event.sessionID} ходов к капсулированию=${plan.capsule.length}, мелких=${plan.minor.length}`,
         );
-      }
-    });
-
-    // ——— read_omitted_content: retrieval из omission-кэша ———
-    void ctx.tool.transform(editor => {
-      editor.add({
-        name: "read_omitted_content",
-        description:
-          "Достать содержимое, вырезанное при trim-компакшне, по Content-ID из omission-нотиса",
-        input: {
-          type: "object",
-          properties: {
-            content_id: {
-              type: "string",
-              description: "Content-ID из нотиса [Content ID: ...]",
+        try {
+          const { summary, capsuleCount } = await buildCapsuleSummary(
+            msgs,
+            KEEP_TURNS,
+            async prompt => {
+              const out = await ctx.generate.text({ model: FLASH, prompt });
+              const obj = out as unknown as { text?: string };
+              return String(obj?.text ?? out ?? "").trim();
             },
+          );
+          event.result = { summary };
+          log(
+            `compaction hook: ${capsuleCount} капсул за ${Date.now() - t0}ms`,
+          );
+        } catch (e) {
+          // отказ капсул НЕ должен ломать нативный компакшн: отдаём одну строку-заглушку
+          log(
+            `compaction hook: капсулы упали (${String(e).slice(0, 120)}) — нативный саммари`,
+          );
+        }
+      });
+
+      // ——— read_omitted_content: retrieval из omission-кэша ———
+      void ctx.tool.transform(editor => {
+        editor.add({
+          name: "read_omitted_content",
+          description:
+            "Достать содержимое, вырезанное при trim-компакшне, по Content-ID из omission-нотиса",
+          input: {
+            type: "object",
+            properties: {
+              content_id: {
+                type: "string",
+                description: "Content-ID из нотиса [Content ID: ...]",
+              },
+            },
+            required: ["content_id"],
+            additionalProperties: false,
           },
-          required: ["content_id"],
-          additionalProperties: false,
-        },
-        execute: async raw => {
-          const input = raw as { content_id: string };
-          return { content: retrievalAnswer(store, input.content_id) };
-        },
+          execute: async raw => {
+            const input = raw as { content_id: string };
+            return { content: retrievalAnswer(store, input.content_id) };
+          },
+        });
       });
-    });
 
-    // ——— команды ———
-    void ctx.command.transform(editor => {
-      editor.add({
-        name: "arkive-compact",
-        description:
-          "Капсульный компакшн сессии (нативный механизм, hook Arkive)",
-        execute: async ({ sessionID }: { sessionID: string }) => {
-          await ctx.session.compact({ sessionID } as never);
-        },
-      });
-      editor.add({
-        name: "arkive-trim",
-        description:
-          "Физическая чистка тул-I/O старых ходов (roundtrip; сохраняет sessionID)",
-        execute: async ({ sessionID }: { sessionID: string }) => {
-          if (locks.has(sessionID)) return;
-          locks.add(sessionID);
-          try {
-            const dir = ctx.location.directory;
-            // REST-реализация SessionApi поверх клиентского контекста
-            const api = {
-              exportTransfer: async (sid: string) => {
-                const r = await fetch(
-                  restBase() + `/experimental/session/${sid}/export`,
-                  { headers: { authorization: restAuth() } },
-                );
-                return ((await r.json()) as { data: Transfer }).data;
-              },
-              importTransfer: async (body: {
-                info: Record<string, unknown>;
-                messages: TransferMessage[];
-                location?: { directory: string };
-              }) => {
-                const r = await fetch(
-                  restBase() + "/experimental/session/import",
-                  {
-                    method: "POST",
-                    headers: {
-                      authorization: restAuth(),
-                      "content-type": "application/json",
+      // ——— команды ———
+      void ctx.command.transform(editor => {
+        editor.add({
+          name: "arkive-compact",
+          description:
+            "Капсульный компакшн сессии (нативный механизм, hook Arkive)",
+          execute: async ({ sessionID }: { sessionID: string }) => {
+            await ctx.session.compact({ sessionID } as never);
+          },
+        });
+        editor.add({
+          name: "arkive-trim",
+          description:
+            "Физическая чистка тул-I/O старых ходов (roundtrip; сохраняет sessionID)",
+          execute: async ({ sessionID }: { sessionID: string }) => {
+            if (locks.has(sessionID)) return;
+            locks.add(sessionID);
+            try {
+              const dir = ctx.location.directory;
+              // REST-реализация SessionApi поверх клиентского контекста
+              const api = {
+                exportTransfer: async (sid: string) => {
+                  const r = await fetch(
+                    restBase() + `/experimental/session/${sid}/export`,
+                    { headers: { authorization: restAuth() } },
+                  );
+                  return ((await r.json()) as { data: Transfer }).data;
+                },
+                importTransfer: async (body: {
+                  info: Record<string, unknown>;
+                  messages: TransferMessage[];
+                  location?: { directory: string };
+                }) => {
+                  const r = await fetch(
+                    restBase() + "/experimental/session/import",
+                    {
+                      method: "POST",
+                      headers: {
+                        authorization: restAuth(),
+                        "content-type": "application/json",
+                      },
+                      body: JSON.stringify(body),
                     },
-                    body: JSON.stringify(body),
-                  },
-                );
-                const text = await r.text();
-                let id: string | undefined;
-                try {
-                  id = JSON.parse(text).data?.id;
-                } catch {
-                  /* не json */
-                }
-                return { status: r.status, id, text };
-              },
-              remove: async (sid: string) =>
-                (
-                  await fetch(restBase() + `/session/${sid}`, {
-                    method: "DELETE",
+                  );
+                  const text = await r.text();
+                  let id: string | undefined;
+                  try {
+                    id = JSON.parse(text).data?.id;
+                  } catch {
+                    /* не json */
+                  }
+                  return { status: r.status, id, text };
+                },
+                remove: async (sid: string) =>
+                  (
+                    await fetch(restBase() + `/session/${sid}`, {
+                      method: "DELETE",
+                      headers: { authorization: restAuth() },
+                    })
+                  ).status,
+                inbox: async (sid: string) => {
+                  const r = await fetch(restBase() + `/session/${sid}/inbox`, {
                     headers: { authorization: restAuth() },
-                  })
-                ).status,
-              inbox: async (sid: string) => {
-                const r = await fetch(restBase() + `/session/${sid}/inbox`, {
-                  headers: { authorization: restAuth() },
-                });
-                const items =
-                  ((await r.json()) as { data?: InboxItem[] }).data ?? [];
-                return items.map(i => ({
-                  id: i.id,
-                  text: i.payload?.text ?? i.text ?? "",
-                }));
-              },
-              cancelInboxItem: async (sid: string, iid: string) =>
-                (
-                  await fetch(restBase() + `/session/${sid}/inbox/${iid}`, {
-                    method: "DELETE",
-                    headers: { authorization: restAuth() },
-                  })
-                ).status,
-              prompt: async (sid: string, text: string) =>
-                (
-                  await fetch(restBase() + `/session/${sid}/prompt`, {
-                    method: "POST",
-                    headers: {
-                      authorization: restAuth(),
-                      "content-type": "application/json",
-                    },
-                    body: JSON.stringify({ text }),
-                  })
-                ).status,
-            } as const;
+                  });
+                  const items =
+                    ((await r.json()) as { data?: InboxItem[] }).data ?? [];
+                  return items.map(i => ({
+                    id: i.id,
+                    text: i.payload?.text ?? i.text ?? "",
+                  }));
+                },
+                cancelInboxItem: async (sid: string, iid: string) =>
+                  (
+                    await fetch(restBase() + `/session/${sid}/inbox/${iid}`, {
+                      method: "DELETE",
+                      headers: { authorization: restAuth() },
+                    })
+                  ).status,
+                prompt: async (sid: string, text: string) =>
+                  (
+                    await fetch(restBase() + `/session/${sid}/prompt`, {
+                      method: "POST",
+                      headers: {
+                        authorization: restAuth(),
+                        "content-type": "application/json",
+                      },
+                      body: JSON.stringify({ text }),
+                    })
+                  ).status,
+              } as const;
 
-            const { rewriteSession } = await import("./transport");
-            const result = await rewriteSession(
-              api,
+              const { rewriteSession } = await import("./transport");
+              const result = await rewriteSession(
+                api,
+                sessionID,
+                dir,
+                transfer => {
+                  const plans = planTrim(transfer.messages, TRIM_KEEP_TURNS, {
+                    contentIdFor: contentId,
+                  });
+                  // кэш: собрать omission-записи при применении
+                  const { messages } = applyTrim(transfer, plans, store);
+                  return messages;
+                },
+                log,
+              );
+              advanceGeneration(store);
+              saveStore(store);
+              persistBackup(sessionID, result.backup);
+              log(`trim ${sessionID}: готово, бэкап записан`);
+            } catch (e) {
+              log(`trim ${sessionID}: ОТКАЗ — ${String(e).slice(0, 200)}`);
+            } finally {
+              locks.delete(sessionID);
+            }
+          },
+        });
+        editor.add({
+          name: "arkive-stats",
+          description: "Статистика Arkive: omission-кэш, генерация",
+          execute: async ({ sessionID }: { sessionID: string }) => {
+            await ctx.session.synthetic({
               sessionID,
-              dir,
-              transfer => {
-                const plans = planTrim(transfer.messages, TRIM_KEEP_TURNS, {
-                  contentIdFor: contentId,
-                });
-                // кэш: собрать omission-записи при применении
-                const { messages } = applyTrim(transfer, plans, store);
-                return messages;
-              },
-              log,
-            );
-            advanceGeneration(store);
-            saveStore(store);
-            persistBackup(sessionID, result.backup);
-            log(`trim ${sessionID}: готово, бэкап записан`);
-          } catch (e) {
-            log(`trim ${sessionID}: ОТКАЗ — ${String(e).slice(0, 200)}`);
-          } finally {
-            locks.delete(sessionID);
-          }
-        },
+              text: `Arkive: omission-кэш ${store.entries.size} записей (генерация ${store.generation}, хранятся последние 2). Лог: ${LOG}`,
+            } as never);
+          },
+        });
       });
-      editor.add({
-        name: "arkive-stats",
-        description: "Статистика Arkive: omission-кэш, генерация",
-        execute: async ({ sessionID }: { sessionID: string }) => {
-          await ctx.session.synthetic({
-            sessionID,
-            text: `Arkive: omission-кэш ${store.entries.size} записей (генерация ${store.generation}, хранятся последние 2). Лог: ${LOG}`,
-          } as never);
-        },
-      });
-    });
+      log("команды arkive-compact/trim/stats зарегистрированы");
+    } catch (e) {
+      log(`command-регистрация упала: ${String(e).slice(0, 160)}`);
+    }
   },
 });
 
