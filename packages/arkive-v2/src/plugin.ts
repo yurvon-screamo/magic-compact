@@ -35,7 +35,7 @@ const log = (s: string) => {
 };
 
 const FLASH = { providerID: "zai-coding-plan", id: "glm-5.3-flash" };
-const KEEP_TURNS = 6; // свежие ходы в компакшне остаются дословно (recent)
+const KEEP_TURNS = 12; // свежие ходы идут minor-строкой, не капсулой; дословный хвост задаёт compaction.keep.tokens (48k ≈ 15–20 ходов зоопарка)
 const TRIM_KEEP_TURNS = 4;
 
 const loadStore = (): OmissionStore => {
