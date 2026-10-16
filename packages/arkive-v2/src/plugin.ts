@@ -21,6 +21,7 @@ import {
   applyTrim,
   buildCapsuleSummary,
   contentId,
+  lookup,
   newStore,
   planTrim,
   retrievalAnswer,
@@ -140,31 +141,42 @@ const deadLetter = (texts: string[], error: string) => {
   }
 };
 
-// —— REST-доступ (кэш service.json при загрузке — ревью Low) ——
-const svc = (() => {
-  const raw = JSON.parse(
-    readFileSync(join(homedir(), ".local/state/opencode/service.json"), "utf8"),
-  ) as {
-    url: string;
-    password: string;
-  };
-  return {
-    base: String(raw.url).replace("0.0.0.0", "127.0.0.1") + "/api",
-    auth: "Basic " + Buffer.from(`opencode:${raw.password}`).toString("base64"),
-  };
-})();
+// —— REST-доступ: ленивая инициализация (отказ роняет только trim-команду, не плагин) ——
+let svcCache: { base: string; auth: string } | null = null;
+const svc = () => {
+  if (!svcCache) {
+    const raw = JSON.parse(
+      readFileSync(
+        join(homedir(), ".local/state/opencode/service.json"),
+        "utf8",
+      ),
+    ) as {
+      url: string;
+      password: string;
+    };
+    svcCache = {
+      base: String(raw.url).replace("0.0.0.0", "127.0.0.1") + "/api",
+      auth:
+        "Basic " + Buffer.from(`opencode:${raw.password}`).toString("base64"),
+    };
+  }
+  return svcCache;
+};
 const restSessionApi = (): SessionApi => ({
   exportTransfer: async sid => {
-    const r = await fetch(`${svc.base}/experimental/session/${sid}/export`, {
-      headers: { authorization: svc.auth },
+    const r = await fetch(`${svc().base}/experimental/session/${sid}/export`, {
+      headers: { authorization: svc().auth },
     });
     if (!r.ok) throw new Error(`export ${sid}: ${r.status}`);
     return ((await r.json()) as { data: Transfer }).data;
   },
   importTransfer: async body => {
-    const r = await fetch(`${svc.base}/experimental/session/import`, {
+    const r = await fetch(`${svc().base}/experimental/session/import`, {
       method: "POST",
-      headers: { authorization: svc.auth, "content-type": "application/json" },
+      headers: {
+        authorization: svc().auth,
+        "content-type": "application/json",
+      },
       body: JSON.stringify(body),
     });
     const text = await r.text();
@@ -178,14 +190,14 @@ const restSessionApi = (): SessionApi => ({
   },
   remove: async sid =>
     (
-      await fetch(`${svc.base}/session/${sid}`, {
+      await fetch(`${svc().base}/session/${sid}`, {
         method: "DELETE",
-        headers: { authorization: svc.auth },
+        headers: { authorization: svc().auth },
       })
     ).status,
   inbox: async sid => {
-    const r = await fetch(`${svc.base}/session/${sid}/inbox`, {
-      headers: { authorization: svc.auth },
+    const r = await fetch(`${svc().base}/session/${sid}/inbox`, {
+      headers: { authorization: svc().auth },
     });
     const items =
       (
@@ -204,25 +216,25 @@ const restSessionApi = (): SessionApi => ({
   },
   cancelInboxItem: async (sid, iid) =>
     (
-      await fetch(`${svc.base}/session/${sid}/inbox/${iid}`, {
+      await fetch(`${svc().base}/session/${sid}/inbox/${iid}`, {
         method: "DELETE",
-        headers: { authorization: svc.auth },
+        headers: { authorization: svc().auth },
       })
     ).status,
   prompt: async (sid, text) =>
     (
-      await fetch(`${svc.base}/session/${sid}/prompt`, {
+      await fetch(`${svc().base}/session/${sid}/prompt`, {
         method: "POST",
         headers: {
-          authorization: svc.auth,
+          authorization: svc().auth,
           "content-type": "application/json",
         },
         body: JSON.stringify({ text }),
       })
     ).status,
   listSessions: async () => {
-    const r = await fetch(`${svc.base}/session`, {
-      headers: { authorization: svc.auth },
+    const r = await fetch(`${svc().base}/session`, {
+      headers: { authorization: svc().auth },
     });
     return (
       (
@@ -315,22 +327,27 @@ export default Plugin.define({
             required: ["content_id"],
             additionalProperties: false,
           },
-          execute: async raw => {
+          execute: async (raw, context) => {
             const input = raw as { content_id: string };
-            // per-session поиск: сначала своя сессия, затем все (Content-ID глобально уникален по хэшу)
-            const sid = (input as { sessionID?: string }).sessionID;
-            const own = sid ? stores.get(sid) : undefined;
-            if (own) {
-              const r = retrievalAnswer(own, input.content_id);
-              if (r.includes("\n") || !r.includes("не найден"))
-                return { content: r };
+            // sessionID — из ToolContext (в input его нет: additionalProperties false)
+            const sid = (context as { sessionID?: string } | undefined)
+              ?.sessionID;
+            // порядок: своя сессия → все материализованные из persisted (переживает рестарты);
+            // hit/miss — строго lookup().found, без парсинга текста ответа
+            const keys = [
+              sid,
+              ...Object.keys(persisted.sessions).filter(k => k !== sid),
+            ];
+            for (const key of keys) {
+              if (!key) continue;
+              const s = storeFor(key); // ленивая материализация из omission-store.json
+              if (lookup(s, input.content_id).found) {
+                return { content: retrievalAnswer(s, input.content_id) };
+              }
             }
-            for (const s of stores.values()) {
-              const r = retrievalAnswer(s, input.content_id);
-              if (r.includes("\n") || !r.includes("не найден"))
-                return { content: r };
-            }
-            return { content: retrievalAnswer(newStore(), input.content_id) };
+            return {
+              content: `Content-ID ${input.content_id} не найден (опечатка, либо вытеснен retention). Восстанови источник повторным вызовом исходного тула.`,
+            };
           },
         });
       });

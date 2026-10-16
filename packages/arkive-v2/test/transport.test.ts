@@ -229,3 +229,51 @@ describe("rewriteSession: отказ import → restore-ретрай", () => {
     expect(sourceImports[1]?.messages.length).toBe(2); // restore получил исходник
   });
 });
+
+describe("rewriteSession: двойной отказ (import + restore)", () => {
+  test("dead-letter получает дренированные тексты, throw называет ручной restore", async () => {
+    const dead: Array<{ texts: string[]; error: string }> = [];
+    let sourceImports = 0;
+    const api: SessionApi = {
+      async exportTransfer() {
+        return T("ses_SOURCE", msg("m1", "user", "q"));
+      },
+      async importTransfer(body) {
+        if (body.info.id === "ses_SOURCE") {
+          sourceImports++;
+          return { status: 500, text: "имитация" }; // и основной, и restore — 500
+        }
+        return { status: 200, id: String(body.info.id), text: "" };
+      },
+      async remove() {
+        return 204;
+      },
+      async inbox() {
+        return [{ id: "in1", text: "промпт-кандидат-на-гибель" }];
+      },
+      async cancelInboxItem() {
+        return 200;
+      },
+      async prompt() {
+        return 200;
+      },
+      async listSessions() {
+        return [];
+      },
+    };
+    await expect(
+      rewriteSession(
+        api,
+        "ses_SOURCE",
+        "/loc",
+        t => t.messages,
+        () => {},
+        {
+          onDeadLetter: (texts, error) => dead.push({ texts, error }),
+        },
+      ),
+    ).rejects.toThrow("restore");
+    expect(sourceImports).toBe(2); // основной + restore-ретрай
+    expect(dead[0]?.texts).toEqual(["промпт-кандидат-на-гибель"]);
+  });
+});
