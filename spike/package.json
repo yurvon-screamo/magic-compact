@@ -1,1 +1,7 @@
-{"name":"arkive-spike","private":true,"dependencies":{"@opencode/plugin":"^1.18.0"}}
+{
+  "name": "arkive-spike",
+  "private": true,
+  "dependencies": {
+    "@opencode/plugin": "^1.18.0"
+  }
+}

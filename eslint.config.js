@@ -12,6 +12,9 @@ export default tseslint.config(
       "internal/",
       ".tmp/",
       ".hive/**",
+      // spike/ — зафиксированные живые эксперименты срезов 0–1 (журналы против
+      // реального сервера): any-касты там — часть протокола наблюдения, не прод-код
+      "spike/**",
     ],
   },
   js.configs.recommended,

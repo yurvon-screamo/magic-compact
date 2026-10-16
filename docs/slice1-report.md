@@ -5,18 +5,18 @@
 
 ## Подтверждённая механика roundtrip
 
-| # | Факт | Следствие для arkive |
-|---|---|---|
-| 1 | `export` → `{info, messages}` полный транскрипт; **files живут в `messages[].files` (base64 data)**, НЕ в content | pruning-правила медиа смотрят в `files`-поле; переносятся через roundtrip без потерь (PASS) |
-| 2 | **`message.id` глобально уникальны в БД** (`UNIQUE session_message.id`): import копии чужих id → 500 | **pre-flight import требует перегенерации id сообщений** (msg_+rnd) + свежий session id |
-| 3 | import с занятым session id → 409 (идемпотентность); после remove → 200 с тем же id | основной путь: remove+import родного id; повторный import безопасен |
-| 4 | **import не пересортирует**: REST message-list отдаёт DESC, хронология = reverse; после roundtrip порядок id идентичен исходному | капсулы можно вставлять в середину; позиция сохраняется (PASS) |
-| 5 | **import-сессии полноценно исполняют промпты**: inbox drain, outcome=succeeded, assistant отвечает | «зомби-сессий» нет; текст assistant в `content[].text`, не в `m.text` |
-| 6 | import после удаления tool-ассистента валиден; сессия принимает промпты и отвечает | trim может резать tool-тяжёлые ходы (PASS) |
-| 7 | **projectID не восстанавливается из info** — import кладёт в дефолтный проект; `location: {directory}` в теле import чинит | ВСЕГДА слать location (иначе сессия зоопарка уедет из своей локации: плагины/инструкции отвалятся) |
-| 8 | `fork` **выживает** remove родителя (GET 200) — «recursively deletes children» из доки не про форки | fork применим как живой бэкап; наш вариант — transfer-файл (проще, retention N=3) |
-| 9 | prompt на несуществующую сессию → 404 `SessionNotFoundError` | контракт хаба/крон: ретраи 5с/30с/2мин → dead-letter |
-| 10 | короткие session-id («ses_abc») рвутся 500 — только валидная длинная форма | fresh id = `ses_e` + 24 base62 |
+| #   | Факт                                                                                                                             | Следствие для arkive                                                                               |
+| --- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| 1   | `export` → `{info, messages}` полный транскрипт; **files живут в `messages[].files` (base64 data)**, НЕ в content                | pruning-правила медиа смотрят в `files`-поле; переносятся через roundtrip без потерь (PASS)        |
+| 2   | **`message.id` глобально уникальны в БД** (`UNIQUE session_message.id`): import копии чужих id → 500                             | **pre-flight import требует перегенерации id сообщений** (msg_+rnd) + свежий session id            |
+| 3   | import с занятым session id → 409 (идемпотентность); после remove → 200 с тем же id                                              | основной путь: remove+import родного id; повторный import безопасен                                |
+| 4   | **import не пересортирует**: REST message-list отдаёт DESC, хронология = reverse; после roundtrip порядок id идентичен исходному | капсулы можно вставлять в середину; позиция сохраняется (PASS)                                     |
+| 5   | **import-сессии полноценно исполняют промпты**: inbox drain, outcome=succeeded, assistant отвечает                               | «зомби-сессий» нет; текст assistant в `content[].text`, не в `m.text`                              |
+| 6   | import после удаления tool-ассистента валиден; сессия принимает промпты и отвечает                                               | trim может резать tool-тяжёлые ходы (PASS)                                                         |
+| 7   | **projectID не восстанавливается из info** — import кладёт в дефолтный проект; `location: {directory}` в теле import чинит       | ВСЕГДА слать location (иначе сессия зоопарка уедет из своей локации: плагины/инструкции отвалятся) |
+| 8   | `fork` **выживает** remove родителя (GET 200) — «recursively deletes children» из доки не про форки                              | fork применим как живой бэкап; наш вариант — transfer-файл (проще, retention N=3)                  |
+| 9   | prompt на несуществующую сессию → 404 `SessionNotFoundError`                                                                     | контракт хаба/крон: ретраи 5с/30с/2мин → dead-letter                                               |
+| 10  | короткие session-id («ses_abc») рвутся 500 — только валидная длинная форма                                                       | fresh id = `ses_e` + 24 base62                                                                     |
 
 ## Тест-артефакты (3 FAIL — не баги сервера)
 
