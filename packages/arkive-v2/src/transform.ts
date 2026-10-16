@@ -1,13 +1,12 @@
-// Transform (срез 2): применение плана трима к transfer-массиву.
-// Чистая функция: (transfer, план, кэш) → {transfer', omissions}
-// Инварианты: user-сообщения и files НЕ трогаем никогда; порядок сохраняем.
+// Transform (срез 2, ревью v2): применение плана трима к transfer-массиву.
+// Чистая функция: (transfer, план, кэш) → {messages, stats}
+// Инварианты: user-сообщения и files НЕ трогаем никогда; порядок сохраняем;
+// не-текст части tool-вывода (медиа) не сносим; всё вырезанное → кэш (retrievable).
 import {
   type Transfer,
   type TransferMessage,
   type ToolPart,
   isToolPart,
-  toolOutputText,
-  toolInputText,
 } from "./union";
 import { type TurnPlan } from "./rules";
 import { type OmissionStore, put } from "./omission";
@@ -46,31 +45,37 @@ export const applyTrim = (
       }
 
       if (d.kind === "replace-output") {
-        if (d.cache) {
-          const original = toolOutputText(p as ToolPart);
-          put(store, (p as ToolPart).name, original);
-          stats.bytesCached += original.length;
+        if (d.cacheContent) {
+          put(store, (p as ToolPart).name, d.cacheContent);
+          stats.bytesCached += d.cacheContent.length;
         }
         stats.replaced++;
         const part = structuredClone(p) as ToolPart;
+        // не-текст части вывода (медиа и пр.) сохраняем — сносим только текст
+        const nonText = (part.state?.content ?? []).filter(
+          c => (c as { type?: string }).type !== "text",
+        );
         part.state = {
           ...(part.state ?? {}),
-          content: [{ type: "text", text: d.notice }],
+          content: [...nonText, { type: "text", text: d.notice }],
         };
         return part;
       }
       if (d.kind === "replace-input") {
-        if (d.cache) {
-          const original = toolInputText(p as ToolPart);
-          put(store, (p as ToolPart).name, original);
-          stats.bytesCached += original.length;
+        if (d.cacheContent) {
+          put(store, (p as ToolPart).name, d.cacheContent);
+          stats.bytesCached += d.cacheContent.length;
         }
         stats.replaced++;
         const part = structuredClone(p) as ToolPart;
         part.state = { ...(part.state ?? {}), input: { omitted: d.notice } };
         return part;
       }
-      // truncate-input
+      // truncate-input: полную команду в кэш, в контекст — усечённую
+      if (d.cacheContent) {
+        put(store, (p as ToolPart).name, d.cacheContent);
+        stats.bytesCached += d.cacheContent.length;
+      }
       stats.truncated++;
       const part = structuredClone(p) as ToolPart;
       part.state = {

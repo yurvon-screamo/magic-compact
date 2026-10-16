@@ -202,3 +202,12 @@ The API's stored source message order is authoritative. In OpenCode 1.18.30, `Se
 - Pre-write source drift and every failure after backup creation preserve both sessions; post-write errors report only the source and backup IDs plus manual-recovery guidance and never record a successful stats increment. Compaction never auto-applies the backup; trim applies its backup only after its first source part update is attempted.
 - In-progress, no-op, success, and failure toasts use the shared best-effort control-operation deadline helper. A late-settling timed-out progress request reasserts the latest terminal toast without delaying command settlement. Toast timeout or failure cannot change the primary command result, trigger recovery, replace the root error, or skip an already-required recovery attempt. A progress request applied remotely after its client promise rejected remains an undetectable host-side race.
 - The command hook throws so OpenCode does not continue sending the slash command to the LLM.
+
+## OpenCode V2 runtime (Arkive V2)
+
+- Commands: `/arkive-compact` (native compact through the capsule hook),
+  `/arkive-trim [N]` (roundtrip trim, N = turns kept verbatim, default 4),
+  `/arkive-stats` (omission cache + backups). Tool: `read_omitted_content`
+  (Content-ID retrieval, cross-session fallback by hash uniqueness).
+- V1 runtime (`/magic-compact` et al.) is untouched and NOT loadable on V2;
+  arkive-v2 is the V2 replacement (see docs/Core.md "Arkive V2" + ADR-001).

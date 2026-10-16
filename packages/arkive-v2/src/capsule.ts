@@ -42,7 +42,7 @@ export const capsulePrompt = (turn: {
     "Не добавляй ничего от себя. Не пересказывай общими словами. Если были ошибки — назови их точно.",
     "",
     `ЗАПРОС ПОЛЬЗОВАТЕЛЯ: ${q}`,
-    ...parts.map(p => p),
+    ...parts,
   ].join("\n");
 };
 
@@ -58,6 +58,7 @@ export type CapsulePlan = {
 export const planCapsules = (
   messages: TransferMessage[],
   keepTurns: number,
+  maxCapsules = Number.POSITIVE_INFINITY,
 ): CapsulePlan => {
   const turns = splitTurns(messages);
   const fromCapsule = Math.max(0, turns.length - keepTurns);
@@ -65,6 +66,14 @@ export const planCapsules = (
   const minor: CapsulePlan["minor"] = [];
   turns.forEach((t, i) => {
     if (i >= fromCapsule) return;
+    if (capsule.length >= maxCapsules) {
+      // за лимитом flash-вызовов: не теряем упоминание — minor-строкой
+      minor.push({
+        turnIndex: i,
+        line: `· ход ${i + 1}: ${(t.user?.text ?? "(без текста)").slice(0, 80)} [за лимитом капсул]`,
+      });
+      return;
+    }
     const volume =
       (t.user?.text ?? "").length
       + t.assistants.reduce(
@@ -98,14 +107,13 @@ export const planCapsules = (
 export const assembleSummary = (
   capsules: Capsule[],
   minorLines: string[],
-  keepTurns: number,
 ): string => {
   const blocks = capsules.map(c => c.text.trim()).filter(Boolean);
   const head = ["## Капсульная история (точные выжимки ходов)", "", ...blocks];
   if (minorLines.length) head.push("", "## Мелкие ходы", ...minorLines);
   head.push(
     "",
-    `## Свежие ${keepTurns} ход(ов) следуют ниже дословно (recent)`,
+    "## Свежая часть сессии (recent-хвост сервера) следует ниже дословно",
   );
   return head.join("\n");
 };
@@ -115,8 +123,9 @@ export const buildCapsuleSummary = async (
   messages: TransferMessage[],
   keepTurns: number,
   generate: GenerateFn,
+  maxCapsules = Number.POSITIVE_INFINITY,
 ): Promise<{ summary: string; capsuleCount: number }> => {
-  const plan = planCapsules(messages, keepTurns);
+  const plan = planCapsules(messages, keepTurns, maxCapsules);
   const capsules: Capsule[] = [];
   for (const c of plan.capsule) {
     const text = await generate(c.prompt);
@@ -126,7 +135,6 @@ export const buildCapsuleSummary = async (
     summary: assembleSummary(
       capsules,
       plan.minor.map(m => m.line),
-      keepTurns,
     ),
     capsuleCount: capsules.length,
   };

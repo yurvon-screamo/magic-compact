@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type ToolPart,
+  type TransferMessage,
   type Transfer,
   assistantText,
   toolOutputText,
@@ -43,7 +44,7 @@ const toolPart = (
   name: string,
   input: Record<string, unknown>,
   output: string,
-) => ({
+): ToolPart => ({
   type: "tool",
   id,
   name,
@@ -146,7 +147,7 @@ describe("rules: адаптация V1-правил", () => {
     );
     expect(d.kind).toBe("replace-output");
     if (d.kind === "replace-output") {
-      expect(d.cache).toBe(true);
+      expect(d.cacheContent).toBe(big);
       expect(d.notice).toContain("Content ID");
     }
   });
@@ -157,11 +158,12 @@ describe("rules: адаптация V1-правил", () => {
       ctx,
     );
     expect(d.kind).toBe("truncate-input");
+    if (d.kind === "truncate-input") expect(d.cacheContent).toBe(long);
   });
-  test("read: большой вывод → нотис БЕЗ кэша (перезачитываемо)", () => {
+  test("read: большой вывод → нотис + кэш-снапшот (V1-семантика)", () => {
     const d = decideToolPart(toolPart("t4", "read", { path: "/f" }, big), ctx);
     expect(d.kind).toBe("replace-output");
-    if (d.kind === "replace-output") expect(d.cache).toBe(false);
+    if (d.kind === "replace-output") expect(d.cacheContent).toBe(big);
   });
   test("edit: большое содержание → replace-input + кэш", () => {
     const d = decideToolPart(
@@ -169,7 +171,7 @@ describe("rules: адаптация V1-правил", () => {
       ctx,
     );
     expect(d.kind).toBe("replace-input");
-    if (d.kind === "replace-input") expect(d.cache).toBe(true);
+    if (d.kind === "replace-input") expect(d.cacheContent).toContain("x");
   });
   test("subagent: лимит выше (4096 chars)", () => {
     const mid = "z".repeat(2000); // > default, < task
@@ -207,13 +209,15 @@ describe("splitTurns / planTrim", () => {
   test("ходы делятся по user", () => {
     const turns = splitTurns(msgs);
     expect(turns.length).toBe(2);
-    expect(turns[0].user?.id).toBe("u1");
-    expect(turns[0].assistants.map(a => a.id)).toEqual(["a1"]);
+    expect(turns[0]?.user?.id).toBe("u1");
+    expect((turns[0] ?? { assistants: [] }).assistants.map(a => a.id)).toEqual([
+      "a1",
+    ]);
   });
   test("planTrim keepTurns=1: старый ход режется, свежий нет", () => {
     const plans = planTrim(msgs, 1, ctx);
-    expect(plans[0].toolDecisions.size).toBe(1); // старый ход: решение есть
-    expect(plans[1].toolDecisions.size).toBe(0); // свежий: нетронут
+    expect(plans[0]?.toolDecisions.size).toBe(1); // старый ход: решение есть
+    expect(plans[1]?.toolDecisions.size).toBe(0); // свежий: нетронут
   });
 });
 
@@ -245,19 +249,25 @@ describe("applyTrim: чистая трансформация", () => {
     expect(
       (messages[0] as TransferMessage & { files?: unknown[] }).files,
     ).toEqual([{ data: "abc" }]); // files нетронуты
-    const a1p = (messages[1].content ?? []).find(
+    const a1p = (messages[1]?.content ?? []).find(
       p => p.type === "tool",
     ) as ToolPart;
-    const a2p = (messages[3].content ?? []).find(
+    const a2p = (messages[3]?.content ?? []).find(
       p => p.type === "tool",
     ) as ToolPart;
-    expect(a1p.state.content[0].text).toContain("Content ID"); // старый — заменён
-    expect(a2p.state.content[0].text).toContain("BIG"); // свежий — дословно
+    expect(a1p.state?.content?.[0]).toHaveProperty(
+      "text",
+      expect.stringContaining("Content ID"),
+    ); // старый — заменён
+    expect(a2p.state?.content?.[0]).toHaveProperty(
+      "text",
+      expect.stringContaining("BIG"),
+    ); // свежий — дословно
     expect(store.entries.size).toBe(1); // только старый в кэше
     expect(stats.replaced).toBe(1);
     expect(stats.bytesCached).toBe(bigOut.length);
     // reasoning-парт не потерялся
-    expect((messages[1].content ?? []).some(p => p.type === "reasoning")).toBe(
+    expect((messages[1]?.content ?? []).some(p => p.type === "reasoning")).toBe(
       true,
     );
   });

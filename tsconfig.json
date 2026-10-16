@@ -27,6 +27,10 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["packages/*/src/**/*.ts"],
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/arkive-v2/plugin/**/*.ts",
+    "packages/arkive-v2/test/**/*.ts"
+  ],
   "exclude": ["node_modules", "src-*", "internal"]
 }

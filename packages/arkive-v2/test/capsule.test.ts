@@ -57,7 +57,7 @@ describe("planCapsules", () => {
     ];
     const plan = planCapsules(msgs, 1);
     expect(plan.capsule.length).toBe(1); // только старый ход
-    expect(plan.capsule[0].turnIndex).toBe(0);
+    expect(plan.capsule[0]?.turnIndex).toBe(0);
     expect(plan.minor.length).toBe(0);
   });
   test("мелкий ход без тулов → minor-строка, без flash-вызова", () => {
@@ -68,7 +68,7 @@ describe("planCapsules", () => {
     const plan = planCapsules(msgs, 0);
     expect(plan.capsule.length).toBe(0);
     expect(plan.minor.length).toBe(1);
-    expect(plan.minor[0].line).toContain("привет");
+    expect(plan.minor[0]?.line).toContain("привет");
   });
   test("ход с тулом капсулируется независимо от объёма (факты тулов важнее порога)", () => {
     const msgs = [
@@ -116,7 +116,6 @@ describe("assembleSummary / buildCapsuleSummary", () => {
         },
       ],
       ["· мелкий вопрос"],
-      6,
     );
     expect(s).toContain("## Капсульная история");
     expect(s).toContain("E0308");
@@ -149,6 +148,26 @@ describe("assembleSummary / buildCapsuleSummary", () => {
     expect(capsuleCount).toBe(2);
     expect(summary).toContain("КАПСУЛА#1");
     expect(summary).toContain("КАПСУЛА#2");
+  });
+  test("maxCapsules: сверх лимита ходы уходят в minor с пометкой", () => {
+    const msgs = [
+      msg("u1", "user", { text: "первый ".repeat(50) }),
+      msg("a1", "assistant", {
+        content: [toolPart("p1", "shell", { command: "x" }, "o".repeat(700))],
+      }),
+      msg("u2", "user", { text: "второй ".repeat(50) }),
+      msg("a2", "assistant", {
+        content: [toolPart("p2", "shell", { command: "y" }, "o".repeat(700))],
+      }),
+      msg("u3", "user", { text: "третий ".repeat(50) }),
+      msg("a3", "assistant", {
+        content: [toolPart("p3", "shell", { command: "z" }, "o".repeat(700))],
+      }),
+    ];
+    const plan = planCapsules(msgs, 0, 2);
+    expect(plan.capsule.length).toBe(2);
+    expect(plan.minor.length).toBe(1);
+    expect(plan.minor[0]?.line).toContain("за лимитом капсул");
   });
   test("на живой фикстуре: один ход с тулом → одна капсула при keep=0", async () => {
     const { summary, capsuleCount } = await buildCapsuleSummary(

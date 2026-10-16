@@ -60,3 +60,26 @@ Compress a conversation without flattening it into a single generic recap.
 ## Stats
 
 - Track net tokens physically pruned, inline-image tokens projected out per model request, their separate cached-read savings, and estimated money saved per conversation. Existing version-1 stats without media fields remain valid and read as zero media savings. Before, projected-after, and actual-after model-facing counts use the same pure media projection plus local `gpt-tokenizer` canonical active-content method: model-facing synthetic parts are included and ignored reporting notices are excluded. Compaction and trim compute the exact pre-notice stored result once, persist savings on that basis, and require the final actual stored count to equal the projection. There is no self-referential fixed point. Gates, profitability, physical stats, the ignored notice and that final equality all use these stored-history counts, labelled `Stored history (estimate)`. They include any prefix a completed native checkpoint hides from the model, so on such a session they can exceed the request OpenCode sends; they remain canonical estimates, not the model request size or provider usage. Trimming hidden tool output lowers them even though the request is unchanged. The notice also reports the operation kind (summarized request turns or trimmed tool calls) and, for compaction, the whole turns `N` preserved. The `/magic-stats` notice continues to distinguish canonical estimates from provider context-window usage; compact and trim notices report canonical counts of the stored history. OpenCode's context meter is a provider usage snapshot and can remain stale after in-place compaction until a later assistant response refreshes it. Magic Compact never fabricates an after-provider count or mutates provider token metadata.
+
+## Arkive V2 core behavior (OpenCode V2)
+
+- Compaction: native `session.hook("compaction")` builds exact capsules for the
+  ENTIRE `event.messages` (server has already cut its verbatim recent tail via
+  `compaction.keep.tokens`) — no gap between capsule boundary and server tail.
+  Capsule budget: MAX_CAPSULES=40, hook deadline 20 min, failure → native summary.
+- Trim: roundtrip `export → transform → pre-flight(re-id, then REMOVED) →
+inbox drain (texts preserved, dead-letter on failure) → remove → native-id
+import → drained prompts re-sent`. Precondition: session has no child sessions.
+  Omission buffer is persisted write-ahead (before remove); committed after
+  successful import. Backups: x3 rotation per session.
+- Omission store: per-session; Content-ID = sha256 of content (survives rewrites);
+  retention: last 2 generations per session; miss → defined "not found" answer.
+
+### Restore runbook (trim failure)
+
+1. `cat ~/.local/state/arkive-v2/dead-letter.log` — drained prompts to re-send.
+2. Session broken after trim: `DELETE /api/session/{id}`, then
+   `POST /api/experimental/session/import` with the LATEST
+   `~/.local/state/arkive-v2/backups/{id}.1.json` body + `location:{directory}`
+   of the session's project. Ids/messages are native — session returns as-is.
+3. Re-send dead-letter prompts via `POST /api/session/{id}/prompt`.

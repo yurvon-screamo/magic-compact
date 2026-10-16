@@ -144,3 +144,13 @@ gh workflow run publish-opencode.yml --ref main -f release_tag=vX.Y.Z -f release
 ```
 
 Never move, delete, or recreate the tag. Never dispatch while a prior run is active, and never dispatch after the npm version or GitHub Release exists. After a terminal failure that published nothing, a new dispatch is allowed only after the workflow fix is reviewed and pushed, and only after the operator freshly reconfirms the unchanged tag/SHA, that the npm version is absent, and that no GitHub Release exists.
+
+## Arkive V2 (OpenCode V2 port)
+
+`packages/arkive-v2` — V2-native runtime: compaction hook (ADR-001, path A) +
+trim via export/remove/import roundtrip. Layout: `src/` (union, omission, rules,
+transform, capsule, transport, plugin), `plugin/index.ts` (directory entry for
+config `plugins:`), `test/` (unit; live fixtures). Run: `bun test packages/arkive-v2`
+(also in CI). Deployed globally via `~/.config/opencode/plugins/arkive/index.ts`
+(re-export). State: `~/.local/state/arkive-v2/` (arkive.log, backups with x3
+rotation, omission-store.json per-session, dead-letter.log).

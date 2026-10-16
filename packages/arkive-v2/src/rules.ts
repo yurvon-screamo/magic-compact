@@ -1,6 +1,6 @@
-// Pruning-правила (срез 2): адаптация V1-правил Arkive (packages/opencode-plugin/
-// src/compact/prune.ts, пороги docs/Core.md) на V2-union export-массив.
-// Чистые функции: вход — сообщения transfer, выход — решения по tool-партам.
+// Pruning-правила (срез 2, ревью v2): адаптация V1-правил Arkive на V2-union.
+// Семантика ревью: вырезанное ВСЕГДА retrievable (V1 кладёт read-выводы и полные
+// команды в omission-кэш; edit считается по oldString+newString вместе).
 import {
   type ToolPart,
   type TransferMessage,
@@ -18,13 +18,22 @@ const SHELL_CMD_KEEP = 512;
 
 export type ToolDecision =
   | { kind: "keep" }
-  | { kind: "replace-output"; notice: string; cache: boolean } // вывод → нотис; cache=положить в omission-кэш
-  | { kind: "replace-input"; notice: string; cache: boolean }
-  | { kind: "truncate-input"; kept: string };
+  | { kind: "replace-output"; notice: string; cacheContent?: string }
+  | { kind: "replace-input"; notice: string; cacheContent?: string }
+  | { kind: "truncate-input"; kept: string; cacheContent?: string };
 
 export type RuleCtx = { contentIdFor: (content: string) => string };
 
-/** Правила по имени тула (V2-имена: shell/read/grep/glob/edit/write/subagent/skill/webfetch...). */
+/** Объём edit/write-правки: oldString + newString (+content) вместе (как V1). */
+const editVolumeOf = (p: ToolPart): string => {
+  const i = p.state?.input as Record<string, unknown> | undefined;
+  if (!i) return "";
+  return [i.oldString, i.newString, i.content]
+    .filter((x): x is string => typeof x === "string")
+    .join("\n");
+};
+
+/** Правила по имени тула (V2-имена). */
 export const decideToolPart = (p: ToolPart, ctx: RuleCtx): ToolDecision => {
   const name = p.name;
   const out = toolOutputText(p);
@@ -33,38 +42,42 @@ export const decideToolPart = (p: ToolPart, ctx: RuleCtx): ToolDecision => {
   switch (name) {
     case "read":
     case "grep":
-    case "glob":
-      // перезачитываемо: вывод вон, БЕЗ кэша (V1: «reloadable»)
+    case "glob": {
+      // V1 кладёт read-вывод в кэш с Content-ID: исторический снапшот невосстановим
+      // перечитыванием (источник мог измениться) — retrievable, как у V1
       if (out && overLimit(out, DEFAULT_LIMIT)) {
+        const id = ctx.contentIdFor(out);
         return {
           kind: "replace-output",
-          notice:
-            "[Исторический вывод опущён (файл/поиск перечитываем). Прочти заново при необходимости.]",
-          cache: false,
+          notice: `[Исторический вывод опущён; Content ID: ${id}. Достань точный снапшот через read_omitted_content, либо перечитай источник для текущего состояния.]`,
+          cacheContent: out,
         };
       }
       return { kind: "keep" };
+    }
 
     case "write":
-    case "edit":
-      // содержимое правки → нотис + кэш («reread file»)
-      if (input && overLimit(input, DEFAULT_LIMIT)) {
-        const id = ctx.contentIdFor(input);
+    case "edit": {
+      const editVolume = editVolumeOf(p);
+      if (editVolume && overLimit(editVolume, DEFAULT_LIMIT)) {
+        const id = ctx.contentIdFor(editVolume);
         return {
           kind: "replace-input",
           notice: `[Содержимое правки опущено; Content ID: ${id}. Достань через read_omitted_content или перечитай файл.]`,
-          cache: true,
+          cacheContent: editVolume,
         };
       }
       return { kind: "keep" };
+    }
 
     case "shell":
-    case "bash":
+    case "bash": {
       if (input.length > SHELL_CMD_TRUNCATE) {
+        // полную команду — в кэш (V1): хвост не теряется
         return {
           kind: "truncate-input",
-          kept:
-            input.slice(0, SHELL_CMD_KEEP) + "\n[REST OF COMMAND TRUNCATED]",
+          kept: `${input.slice(0, SHELL_CMD_KEEP)}\n[REST OF COMMAND TRUNCATED; Content ID: ${ctx.contentIdFor(input)} — полный текст через read_omitted_content]`,
+          cacheContent: input,
         };
       }
       if (out && overLimit(out, DEFAULT_LIMIT)) {
@@ -72,45 +85,49 @@ export const decideToolPart = (p: ToolPart, ctx: RuleCtx): ToolDecision => {
         return {
           kind: "replace-output",
           notice: `[Вывод команды опущён; Content ID: ${id}. Достань через read_omitted_content.]`,
-          cache: true,
+          cacheContent: out,
         };
       }
       return { kind: "keep" };
+    }
 
     case "subagent":
-    case "task":
+    case "task": {
       if (out && overLimit(out, TASK_OUTPUT_LIMIT)) {
         const id = ctx.contentIdFor(out);
         return {
           kind: "replace-output",
           notice: `[Вывод субагента опущён; Content ID: ${id}. Достань через read_omitted_content.]`,
-          cache: true,
+          cacheContent: out,
         };
       }
       return { kind: "keep" };
+    }
 
-    case "skill":
+    case "skill": {
+      // скилл перезапускаем — вывод не кэшируем (V1: reloadable by re-invocation)
       if (out && overLimit(out, DEFAULT_LIMIT)) {
         return {
           kind: "replace-output",
           notice:
             "[Вывод скилла опущён (перезапускаем). Вызови скилл заново при необходимости.]",
-          cache: false,
         };
       }
       return { kind: "keep" };
+    }
 
-    default:
+    default: {
       // webfetch/websearch/прочие: вывод → кэш при превышении
       if (out && overLimit(out, DEFAULT_LIMIT)) {
         const id = ctx.contentIdFor(out);
         return {
           kind: "replace-output",
           notice: `[Вывод ${name} опущён; Content ID: ${id}. Достань через read_omitted_content.]`,
-          cache: true,
+          cacheContent: out,
         };
       }
       return { kind: "keep" };
+    }
   }
 };
 

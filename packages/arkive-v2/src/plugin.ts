@@ -1,71 +1,245 @@
-// Arkive V2 — плагин OpenCode V2 (срезы 3–4, PLAN.md).
+// Arkive V2 — плагин OpenCode V2 (срезы 3–4, ревью v2).
 // Путь А (ADR-001): нативный compaction-hook + капсулы через ctx.generate.text.
-// Trim-ветка: roundtrip-транспорт (transport.ts) по протоколу среза 1.
+// Инвариант границ (ревью High#2): hook капсулирует ВЕСЬ event.messages — сервер
+// уже отрезал свой verbatim recent-хвост (compaction.keep.tokens); зазора нет.
+// Trim: roundtrip-транспорт (transport.ts) — write-ahead omission, dead-letter.
 import { Plugin } from "@opencode/plugin";
 import {
   appendFileSync,
   mkdirSync,
-  writeFileSync,
-  existsSync,
   readFileSync,
+  readdirSync,
+  renameSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
+  type OmissionStore,
+  type Transfer,
   type TransferMessage,
-  buildCapsuleSummary,
-  planCapsules,
-  planTrim,
   applyTrim,
+  buildCapsuleSummary,
   contentId,
   newStore,
+  planTrim,
   retrievalAnswer,
   advanceGeneration,
-  type OmissionStore,
 } from "./index";
+import { rewriteSession, type SessionApi } from "./transport";
 
-const BACKUP_DIR = join(homedir(), ".local/state/arkive-v2/backups");
-const LOG = join(homedir(), ".local/state/arkive-v2/arkive.log");
+const STATE_DIR = join(homedir(), ".local/state/arkive-v2");
+const BACKUP_DIR = join(STATE_DIR, "backups");
+const DEAD_LETTER = join(STATE_DIR, "dead-letter.log");
+const LOG = join(STATE_DIR, "arkive.log");
+const ensureDir = () => mkdirSync(BACKUP_DIR, { recursive: true });
 const log = (s: string) => {
   try {
+    ensureDir();
     appendFileSync(LOG, `[${new Date().toISOString()}] ${s}\n`);
   } catch {
-    /* диск недоступен — молча */
+    /* диск недоступен — последняя инстанция молчания */
   }
 };
 
 const FLASH = { providerID: "zai-coding-plan", id: "glm-5.3-flash" };
-const KEEP_TURNS = 12; // свежие ходы идут minor-строкой, не капсулой; дословный хвост задаёт compaction.keep.tokens (48k ≈ 15–20 ходов зоопарка)
-const TRIM_KEEP_TURNS = 4;
+const TRIM_KEEP_TURNS = 4; // ходы, не трогаемые тримом (дословно в сессии)
+const MAX_CAPSULES = 40; // ревью High#5: ограничить число flash-вызовов за хук
+const HOOK_DEADLINE_MS = 20 * 60_000; // ревью High#5: общий дедлайн хука → fallback натив
+const BACKUP_KEEP = 3; // ревью Common: retention бэкапов = 3 (ротация)
 
-const loadStore = (): OmissionStore => {
+// —— omission-стора: per-session (ревью Common#3), persist на диск ———
+type PersistedStore = {
+  sessions: Record<string, { generation: number; entries: unknown[] }>;
+};
+const loadPersisted = (): PersistedStore => {
   try {
-    const raw = JSON.parse(
+    return JSON.parse(
       readFileSync(join(BACKUP_DIR, "omission-store.json"), "utf8"),
-    );
-    const s = newStore(raw.generation ?? 1);
-    for (const e of raw.entries ?? []) s.entries.set(e.contentID, e);
-    return s;
+    ) as PersistedStore;
   } catch {
-    return newStore(1);
+    return { sessions: {} };
   }
 };
-const saveStore = (s: OmissionStore) => {
-  mkdirSync(BACKUP_DIR, { recursive: true });
-  writeFileSync(
-    join(BACKUP_DIR, "omission-store.json"),
-    JSON.stringify({
+const persisted = loadPersisted();
+const stores = new Map<string, OmissionStore>();
+const storeFor = (sid: string): OmissionStore => {
+  let s = stores.get(sid);
+  if (!s) {
+    const rec = persisted.sessions[sid];
+    s = newStore(rec?.generation ?? 1);
+    for (const e of (rec?.entries ?? []) as never[])
+      s.entries.set((e as { contentID: string }).contentID, e);
+    stores.set(sid, s);
+  }
+  return s;
+};
+/** write-ahead: запись буфера на диск ДО rewrite (коммит после успешного import). */
+const persistStore = (sid: string, commit: boolean) => {
+  const s = stores.get(sid);
+  if (!s) return;
+  if (commit)
+    persisted.sessions[sid] = {
       generation: s.generation,
       entries: [...s.entries.values()],
-    }),
+    };
+  else {
+    // preview: включаем записи без продвижения генерации — лишние безвредны
+    const rec = persisted.sessions[sid] ?? {
+      generation: s.generation,
+      entries: [],
+    };
+    persisted.sessions[sid] = {
+      generation: rec.generation,
+      entries: (() => {
+        const merged = new Map<string, unknown>();
+        for (const e of (rec.entries as unknown[]) ?? []) {
+          merged.set((e as { contentID: string }).contentID, e);
+        }
+        for (const [k, v] of s.entries) merged.set(k, v);
+        return [...merged.values()];
+      })(),
+    };
+  }
+  ensureDir();
+  writeFileSync(
+    join(BACKUP_DIR, "omission-store.json"),
+    JSON.stringify(persisted),
   );
 };
 const persistBackup = (sessionID: string, transfer: unknown) => {
-  mkdirSync(BACKUP_DIR, { recursive: true });
+  ensureDir();
+  // ротация {sid}.1..3 (ревью: retention 3)
+  for (let i = BACKUP_KEEP - 1; i >= 1; i--) {
+    const from = join(BACKUP_DIR, `${sessionID}.${i}.json`);
+    if (readFileSyncSafe(from))
+      renameSync(from, join(BACKUP_DIR, `${sessionID}.${i + 1}.json`));
+  }
   writeFileSync(
-    join(BACKUP_DIR, `${sessionID}.json`),
+    join(BACKUP_DIR, `${sessionID}.1.json`),
     JSON.stringify(transfer),
   );
+};
+const readFileSyncSafe = (p: string) => {
+  try {
+    readFileSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const deadLetter = (texts: string[], error: string) => {
+  try {
+    ensureDir();
+    appendFileSync(
+      DEAD_LETTER,
+      `[${new Date().toISOString()}] ${error}\n${texts.map(t => `  ПРОМПТ: ${t}`).join("\n")}\n`,
+    );
+  } catch {
+    /* ничего уже не сделать */
+  }
+};
+
+// —— REST-доступ (кэш service.json при загрузке — ревью Low) ——
+const svc = (() => {
+  const raw = JSON.parse(
+    readFileSync(join(homedir(), ".local/state/opencode/service.json"), "utf8"),
+  ) as {
+    url: string;
+    password: string;
+  };
+  return {
+    base: String(raw.url).replace("0.0.0.0", "127.0.0.1") + "/api",
+    auth: "Basic " + Buffer.from(`opencode:${raw.password}`).toString("base64"),
+  };
+})();
+const restSessionApi = (): SessionApi => ({
+  exportTransfer: async sid => {
+    const r = await fetch(`${svc.base}/experimental/session/${sid}/export`, {
+      headers: { authorization: svc.auth },
+    });
+    if (!r.ok) throw new Error(`export ${sid}: ${r.status}`);
+    return ((await r.json()) as { data: Transfer }).data;
+  },
+  importTransfer: async body => {
+    const r = await fetch(`${svc.base}/experimental/session/import`, {
+      method: "POST",
+      headers: { authorization: svc.auth, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    let id: string | undefined;
+    try {
+      id = (JSON.parse(text) as { data?: { id?: string } }).data?.id;
+    } catch {
+      /* не json */
+    }
+    return { status: r.status, id, text };
+  },
+  remove: async sid =>
+    (
+      await fetch(`${svc.base}/session/${sid}`, {
+        method: "DELETE",
+        headers: { authorization: svc.auth },
+      })
+    ).status,
+  inbox: async sid => {
+    const r = await fetch(`${svc.base}/session/${sid}/inbox`, {
+      headers: { authorization: svc.auth },
+    });
+    const items =
+      (
+        (await r.json()) as {
+          data?: Array<{
+            id: string;
+            payload?: { text?: string };
+            text?: string;
+          }>;
+        }
+      ).data ?? [];
+    return items.map(i => ({
+      id: i.id,
+      text: i.payload?.text ?? i.text ?? "",
+    }));
+  },
+  cancelInboxItem: async (sid, iid) =>
+    (
+      await fetch(`${svc.base}/session/${sid}/inbox/${iid}`, {
+        method: "DELETE",
+        headers: { authorization: svc.auth },
+      })
+    ).status,
+  prompt: async (sid, text) =>
+    (
+      await fetch(`${svc.base}/session/${sid}/prompt`, {
+        method: "POST",
+        headers: {
+          authorization: svc.auth,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      })
+    ).status,
+  listSessions: async () => {
+    const r = await fetch(`${svc.base}/session`, {
+      headers: { authorization: svc.auth },
+    });
+    return (
+      (
+        (await r.json()) as {
+          data?: Array<{ id: string; parentID?: string | null }>;
+        }
+      ).data ?? []
+    ).map(s => ({
+      id: s.id,
+      parentID: s.parentID ?? null,
+    }));
+  },
+});
+
+const parseTurnsArg = (raw: unknown, fallback: number): number => {
+  const n = Number.parseInt(String(raw ?? "").trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
 // семафоры per-session (trim)
@@ -75,7 +249,6 @@ export default Plugin.define({
   id: "arkive-v2",
   async setup(ctx) {
     log(`arkive-v2 loaded (app ${ctx.app.version}, ${ctx.location.directory})`);
-    const store = loadStore();
 
     // ——— путь А: капсульный компакшн ———
     type CompactionEvent = {
@@ -83,43 +256,50 @@ export default Plugin.define({
       messages: readonly unknown[];
       result?: { summary: string };
     };
-    type Transfer = {
-      info: Record<string, unknown>;
-      messages: TransferMessage[];
-    };
-    type InboxItem = { id: string; payload?: { text?: string }; text?: string };
     try {
-      await ctx.session.hook("compaction", async (event: CompactionEvent) => {
+      await ctx.session.hook("compaction", async (rawEvent: unknown) => {
+        const event = rawEvent as CompactionEvent;
         const t0 = Date.now();
+        // event.messages — уже без серверного recent-хвоста: капсулируем ЦЕЛИКОМ
         const msgs = event.messages as TransferMessage[];
-        const plan = planCapsules(msgs, KEEP_TURNS);
-        log(
-          `compaction hook: session=${event.sessionID} ходов к капсулированию=${plan.capsule.length}, мелких=${plan.minor.length}`,
-        );
         try {
-          const { summary, capsuleCount } = await buildCapsuleSummary(
-            msgs,
-            KEEP_TURNS,
-            async prompt => {
-              const out = await ctx.generate.text({ model: FLASH, prompt });
-              const obj = out as unknown as { text?: string };
-              return String(obj?.text ?? out ?? "").trim();
-            },
-          );
-          event.result = { summary };
+          const built = await Promise.race([
+            buildCapsuleSummary(
+              msgs,
+              0,
+              async (prompt: string) => {
+                const out = await ctx.generate.text({ model: FLASH, prompt });
+                const obj = out as unknown as { text?: string };
+                return String(obj?.text ?? out ?? "").trim();
+              },
+              MAX_CAPSULES,
+            ),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () => reject(new Error("hook deadline")),
+                HOOK_DEADLINE_MS,
+              ),
+            ),
+          ]);
+          event.result = { summary: built.summary };
           log(
-            `compaction hook: ${capsuleCount} капсул за ${Date.now() - t0}ms`,
+            `compaction hook: ${built.capsuleCount} капсул за ${Date.now() - t0}ms`,
           );
         } catch (e) {
-          // отказ капсул НЕ должен ломать нативный компакшн: отдаём одну строку-заглушку
+          // отказ капсул НЕ ломает нативный компакшн: fallback на нативный саммари
           log(
             `compaction hook: капсулы упали (${String(e).slice(0, 120)}) — нативный саммари`,
           );
         }
       });
+      log("compaction hook зарегистрирован");
+    } catch (e) {
+      log(`hook-регистрация упала: ${String(e).slice(0, 160)}`);
+    }
 
-      // ——— read_omitted_content: retrieval из omission-кэша ———
-      void ctx.tool.transform(editor => {
+    // ——— read_omitted_content ———
+    try {
+      await ctx.tool.transform(editor => {
         editor.add({
           name: "read_omitted_content",
           description:
@@ -137,121 +317,81 @@ export default Plugin.define({
           },
           execute: async raw => {
             const input = raw as { content_id: string };
-            return { content: retrievalAnswer(store, input.content_id) };
+            // per-session поиск: сначала своя сессия, затем все (Content-ID глобально уникален по хэшу)
+            const sid = (input as { sessionID?: string }).sessionID;
+            const own = sid ? stores.get(sid) : undefined;
+            if (own) {
+              const r = retrievalAnswer(own, input.content_id);
+              if (r.includes("\n") || !r.includes("не найден"))
+                return { content: r };
+            }
+            for (const s of stores.values()) {
+              const r = retrievalAnswer(s, input.content_id);
+              if (r.includes("\n") || !r.includes("не найден"))
+                return { content: r };
+            }
+            return { content: retrievalAnswer(newStore(), input.content_id) };
           },
         });
       });
+      log("tool read_omitted_content зарегистрирован");
+    } catch (e) {
+      log(`tool-регистрация упала: ${String(e).slice(0, 160)}`);
+    }
 
-      // ——— команды ———
-      void ctx.command.transform(editor => {
+    // ——— команды ([N] из текста-аргумента — ревью Low) ———
+    try {
+      await ctx.command.transform(editor => {
         editor.add({
           name: "arkive-compact",
           description:
             "Капсульный компакшн сессии (нативный механизм, hook Arkive)",
           execute: async ({ sessionID }: { sessionID: string }) => {
-            await ctx.session.compact({ sessionID } as never);
+            await ctx.session.compact({ sessionID });
           },
         });
         editor.add({
           name: "arkive-trim",
           description:
-            "Физическая чистка тул-I/O старых ходов (roundtrip; сохраняет sessionID)",
-          execute: async ({ sessionID }: { sessionID: string }) => {
+            "Физическая чистка тул-I/O старых ходов (roundtrip; сохраняет sessionID). /arkive-trim [N]",
+          execute: async ({
+            sessionID,
+            prompt,
+          }: {
+            sessionID: string;
+            prompt?: { text?: string };
+          }) => {
             if (locks.has(sessionID)) return;
             locks.add(sessionID);
             try {
-              const dir = ctx.location.directory;
-              // REST-реализация SessionApi поверх клиентского контекста
-              const api = {
-                exportTransfer: async (sid: string) => {
-                  const r = await fetch(
-                    restBase() + `/experimental/session/${sid}/export`,
-                    { headers: { authorization: restAuth() } },
-                  );
-                  return ((await r.json()) as { data: Transfer }).data;
-                },
-                importTransfer: async (body: {
-                  info: Record<string, unknown>;
-                  messages: TransferMessage[];
-                  location?: { directory: string };
-                }) => {
-                  const r = await fetch(
-                    restBase() + "/experimental/session/import",
-                    {
-                      method: "POST",
-                      headers: {
-                        authorization: restAuth(),
-                        "content-type": "application/json",
-                      },
-                      body: JSON.stringify(body),
-                    },
-                  );
-                  const text = await r.text();
-                  let id: string | undefined;
-                  try {
-                    id = JSON.parse(text).data?.id;
-                  } catch {
-                    /* не json */
-                  }
-                  return { status: r.status, id, text };
-                },
-                remove: async (sid: string) =>
-                  (
-                    await fetch(restBase() + `/session/${sid}`, {
-                      method: "DELETE",
-                      headers: { authorization: restAuth() },
-                    })
-                  ).status,
-                inbox: async (sid: string) => {
-                  const r = await fetch(restBase() + `/session/${sid}/inbox`, {
-                    headers: { authorization: restAuth() },
-                  });
-                  const items =
-                    ((await r.json()) as { data?: InboxItem[] }).data ?? [];
-                  return items.map(i => ({
-                    id: i.id,
-                    text: i.payload?.text ?? i.text ?? "",
-                  }));
-                },
-                cancelInboxItem: async (sid: string, iid: string) =>
-                  (
-                    await fetch(restBase() + `/session/${sid}/inbox/${iid}`, {
-                      method: "DELETE",
-                      headers: { authorization: restAuth() },
-                    })
-                  ).status,
-                prompt: async (sid: string, text: string) =>
-                  (
-                    await fetch(restBase() + `/session/${sid}/prompt`, {
-                      method: "POST",
-                      headers: {
-                        authorization: restAuth(),
-                        "content-type": "application/json",
-                      },
-                      body: JSON.stringify({ text }),
-                    })
-                  ).status,
-              } as const;
-
-              const { rewriteSession } = await import("./transport");
+              const keep = parseTurnsArg(prompt?.text, TRIM_KEEP_TURNS);
+              const store = storeFor(sessionID);
+              const api = restSessionApi();
               const result = await rewriteSession(
                 api,
                 sessionID,
-                dir,
+                ctx.location.directory,
                 transfer => {
-                  const plans = planTrim(transfer.messages, TRIM_KEEP_TURNS, {
+                  const plans = planTrim(transfer.messages, keep, {
                     contentIdFor: contentId,
                   });
-                  // кэш: собрать omission-записи при применении
                   const { messages } = applyTrim(transfer, plans, store);
                   return messages;
                 },
                 log,
+                {
+                  // write-ahead: omission-буфер на диск ДО remove
+                  onOmissionsReady: () => persistStore(sessionID, false),
+                  onDeadLetter: (texts, error) =>
+                    deadLetter(texts, `${sessionID}: ${error}`),
+                },
               );
               advanceGeneration(store);
-              saveStore(store);
+              persistStore(sessionID, true);
               persistBackup(sessionID, result.backup);
-              log(`trim ${sessionID}: готово, бэкап записан`);
+              log(
+                `trim ${sessionID}: готово (keep=${keep}), бэкап-ротация x${BACKUP_KEEP}`,
+              );
             } catch (e) {
               log(`trim ${sessionID}: ОТКАЗ — ${String(e).slice(0, 200)}`);
             } finally {
@@ -261,12 +401,16 @@ export default Plugin.define({
         });
         editor.add({
           name: "arkive-stats",
-          description: "Статистика Arkive: omission-кэш, генерация",
+          description: "Статистика Arkive: omission-кэш, бэкапы",
           execute: async ({ sessionID }: { sessionID: string }) => {
+            const store = stores.get(sessionID);
+            const backups = readdirSync(BACKUP_DIR, { withFileTypes: true })
+              .filter(d => d.name.startsWith(sessionID))
+              .map(d => d.name);
             await ctx.session.synthetic({
               sessionID,
-              text: `Arkive: omission-кэш ${store.entries.size} записей (генерация ${store.generation}, хранятся последние 2). Лог: ${LOG}`,
-            } as never);
+              text: `Arkive: omission-кэш сессии ${store?.entries.size ?? 0} записей (генерация ${store?.generation ?? "—"}). Бэкапы: ${backups.join(", ") || "—"}. Лог: ${LOG}`,
+            });
           },
         });
       });
@@ -276,18 +420,3 @@ export default Plugin.define({
     }
   },
 });
-
-// REST-доступ плагина к своему же серверу: registration-файл сервиса
-import { readFileSync as _rf } from "node:fs";
-const restBase = () => {
-  const reg = JSON.parse(
-    _rf(join(homedir(), ".local/state/opencode/service.json"), "utf8"),
-  );
-  return String(reg.url).replace("0.0.0.0", "127.0.0.1") + "/api";
-};
-const restAuth = () =>
-  "Basic "
-  + Buffer.from(
-    `opencode:${JSON.parse(_rf(join(homedir(), ".local/state/opencode/service.json"), "utf8")).password}`,
-  ).toString("base64");
-export const _internal = { restBase, restAuth, existsSync };
