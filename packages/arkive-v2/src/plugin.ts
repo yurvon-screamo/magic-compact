@@ -45,7 +45,7 @@ const log = (s: string) => {
 };
 
 const FLASH = { providerID: "zai-coding-plan", id: "glm-5.3-flash" };
-const TRIM_KEEP_TURNS = 4; // ходы, не трогаемые тримом (дословно в сессии)
+const TRIM_KEEP_TURNS = 10; // ходы, не трогаемые тримом (дословно в сессии)
 const MAX_CAPSULES = 40; // ревью High#5: ограничить число flash-вызовов за хук
 const HOOK_DEADLINE_MS = 20 * 60_000; // ревью High#5: общий дедлайн хука → fallback натив
 const BACKUP_KEEP = 3; // ревью Common: retention бэкапов = 3 (ротация)
